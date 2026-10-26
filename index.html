@@ -150,7 +150,24 @@
     appearance: none; border: 1px solid rgba(243, 239, 255, 0.22); background: transparent; color: var(--muted);
     border-radius: 10px; padding: 10px 6px; font: 700 13px var(--body); cursor: pointer; touch-action: manipulation;
   }
+  .seg.two { grid-template-columns: repeat(2, 1fr); }
   .seg button[aria-pressed="true"] { background: var(--mochi); color: #1a1636; border-color: var(--mochi); }
+  .field .hint { display: block; margin: 0; font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; line-height: 1.4; color: var(--muted); }
+  #walk {
+    pointer-events: auto; touch-action: none;
+    left: calc(env(safe-area-inset-left, 0px) + 22px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 28px);
+    width: 104px; height: 104px; border-radius: 50%; border: 2px solid rgba(243, 239, 255, 0.4);
+    background: rgba(243, 239, 255, 0.1); color: var(--fg);
+    font: 700 15px var(--body); letter-spacing: 0.12em; display: grid; place-items: center; padding: 0;
+  }
+  #walk.on { background: rgba(255, 216, 107, 0.35); border-color: var(--orb); }
+  body.gyro #run { width: 104px; height: 104px; }
+  #recenter {
+    pointer-events: auto; top: calc(env(safe-area-inset-top, 0px) + 12px); left: 50%; transform: translateX(-50%);
+    background: rgba(11, 10, 22, 0.62); color: var(--muted); border: 1px solid rgba(243, 239, 255, 0.14);
+    border-radius: 999px; padding: 7px 14px; font: 700 11px var(--body); letter-spacing: 0.14em; text-transform: uppercase; touch-action: manipulation;
+  }
 
   button.go {
     appearance: none; border: 0; cursor: pointer; border-radius: 14px; padding: 15px 28px;
@@ -177,6 +194,8 @@
 <div class="hud" id="stamina" hidden><i id="stamina-fill"></i></div>
 <div class="hud" id="toast" role="status" aria-live="polite"></div>
 <button class="hud" id="run" type="button" hidden>RUN</button>
+<button class="hud" id="walk" type="button" hidden>WALK</button>
+<button class="hud" id="recenter" type="button" hidden>Recenter</button>
 <div id="joy-base"></div><div id="joy-knob"></div>
 
 <div id="overlay">
@@ -204,6 +223,14 @@
         <input type="range" id="cfg-size" min="1.4" max="3.2" step="0.1" value="2.2">
       </label>
       <div class="field">
+        <span>Controls</span>
+        <div class="seg two" id="cfg-ctrl">
+          <button type="button" data-c="touch" aria-pressed="true">Stick + look</button>
+          <button type="button" data-c="gyro" aria-pressed="false">Gyroscope</button>
+        </div>
+        <p class="hint" id="cfg-ctrl-note">Left thumb moves, right thumb looks.</p>
+      </div>
+      <div class="field">
         <span>Chaser speed</span>
         <div class="seg" id="cfg-speed">
           <button type="button" data-m="0.85" aria-pressed="false">Chill</button>
@@ -217,6 +244,7 @@
     <ul class="rules" id="rules">
       <li><b>Move</b><span>Left thumb drags a stick. Keyboard: WASD or arrows.</span></li>
       <li><b>Look</b><span>Drag anywhere on the right. Desktop: drag with the mouse.</span></li>
+      <li><b>Gyro</b><span>Turn your whole device to look. Hold WALK on the left or RUN on the right.</span></li>
       <li><b>Run</b><span>Hold RUN (or Shift). Stamina drains, so spend it carefully.</span></li>
       <li><b>Windows</b><span>You can see through them, and so can it. Nobody fits through.</span></li>
       <li><b>Stare</b><span>Sometimes it stops and watches. Then it sprints faster than you can.</span></li>
@@ -253,7 +281,8 @@
   var cx = 20, cz = 20, tt = null;
   var ai = { mode: 'chase', t: 0, next: 8, told: false };
   var orbs = [], exitTile = null, exitObj = null, level = null, baseMap = null;
-  var sprintHeld = false, keys = {}, joy = { x: 0, y: 0 };
+  var sprintHeld = false, walkHeld = false, keys = {}, joy = { x: 0, y: 0 };
+  var ctrl = 'touch', gyroReady = false, gyroSeen = false, yawOff = null;
   var bestTime = 0, chaserH = 2.2, speedMult = 1, scaleMul = 1, cAspect = 0.88, cTex = null;
   try { bestTime = parseFloat(localStorage.getItem('mochibo-best')) || 0; } catch (e) {}
 
@@ -637,6 +666,9 @@
   function fmt(t) { var m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + (s < 10 ? '0' : '') + s; }
   function showHud(on) {
     ['hud-stats', 'minimap', 'stamina', 'run'].forEach(function (id) { $(id).hidden = !on; });
+    $('walk').hidden = !(on && ctrl === 'gyro');
+    $('recenter').hidden = !(on && ctrl === 'gyro');
+    document.body.classList.toggle('gyro', ctrl === 'gyro');
   }
   function drawMinimap() {
     var c = $('minimap').getContext('2d'), cs = 114 / N;
@@ -666,7 +698,17 @@
     ai.mode = 'chase'; ai.t = 0; ai.next = 6 + Math.random() * 4;
     // face an open direction from the start tile (+x if open, otherwise +z)
     yaw = grid[1][2] === 0 ? -Math.PI / 2 : Math.PI;
-    joy.x = joy.y = 0; sprintHeld = false; runBtn.classList.remove('on');
+    joy.x = joy.y = 0; sprintHeld = false; walkHeld = false; runBtn.classList.remove('on'); walkBtn.classList.remove('on');
+    setJoyVis(false); joyId = lookId = null;
+    yawOff = null; gyroSeen = false;
+    if (ctrl === 'gyro') {
+      setTimeout(function () {
+        if (state === 'playing' && ctrl === 'gyro' && !gyroSeen) {
+          toast('No motion data from this device. Switched to stick controls.', 4200);
+          setCtrl('touch'); showHud(true);
+        }
+      }, 1800);
+    }
     chaser.visible = true;
     $('overlay').hidden = true; showHud(true);
     $('orbs').textContent = '0 / ' + ORB_COUNT; $('clock').textContent = '0:00';
@@ -769,6 +811,7 @@
   function playUpdate(dt) {
     tPlay += dt;
     var f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) - joy.y;
+    if (ctrl === 'gyro' && (walkHeld || sprintHeld)) f += 1;
     var s = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0) + joy.x;
     var len = Math.hypot(f, s); if (len > 1) { f /= len; s /= len; len = 1; }
     var moving = len > 0.05;
@@ -892,7 +935,7 @@
   }
   stage.addEventListener('touchstart', function (e) {
     e.preventDefault();
-    if (state !== 'playing') return;
+    if (state !== 'playing' || ctrl === 'gyro') return;
     for (var i = 0; i < e.changedTouches.length; i++) {
       var t = e.changedTouches[i];
       if (t.clientX < window.innerWidth * 0.5 && joyId === null) {
@@ -939,7 +982,71 @@
   runBtn.addEventListener('touchend', runOff, { passive: false });
   runBtn.addEventListener('touchcancel', runOff, { passive: false });
   runBtn.addEventListener('mousedown', runOn);
-  window.addEventListener('mouseup', function () { runOff(); });
+  window.addEventListener('mouseup', function () { runOff(); walkOff(); });
+
+  var walkBtn = $('walk');
+  function walkOn(e) { e.preventDefault(); walkHeld = true; walkBtn.classList.add('on'); }
+  function walkOff(e) { if (e) e.preventDefault(); walkHeld = false; walkBtn.classList.remove('on'); }
+  walkBtn.addEventListener('touchstart', walkOn, { passive: false });
+  walkBtn.addEventListener('touchend', walkOff, { passive: false });
+  walkBtn.addEventListener('touchcancel', walkOff, { passive: false });
+  walkBtn.addEventListener('mousedown', walkOn);
+  $('recenter').addEventListener('click', function () { yawOff = null; toast('Centered. Look straight ahead.', 1400); });
+
+  /* ---------- gyroscope ---------- */
+  var gQ = new THREE.Quaternion(), gQ1 = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2), gQ2 = new THREE.Quaternion();
+  var gE = new THREE.Euler(), gZ = new THREE.Vector3(0, 0, 1), gF = new THREE.Vector3(), DEG = Math.PI / 180;
+  function screenAngle() {
+    var a = (window.screen && screen.orientation && typeof screen.orientation.angle === 'number') ? screen.orientation.angle : (window.orientation || 0);
+    return a * DEG;
+  }
+  function onOrient(e) {
+    if (e.alpha == null || e.beta == null || e.gamma == null) return;
+    gyroSeen = true;
+    if (state !== 'playing' || ctrl !== 'gyro') return;
+    gE.set(e.beta * DEG, e.alpha * DEG, -e.gamma * DEG, 'YXZ');
+    gQ.setFromEuler(gE); gQ.multiply(gQ1); gQ.multiply(gQ2.setFromAxisAngle(gZ, -screenAngle()));
+    gF.set(0, 0, -1).applyQuaternion(gQ);
+    var dy = Math.atan2(-gF.x, -gF.z), dp = Math.asin(Math.max(-1, Math.min(1, gF.y)));
+    if (yawOff === null) yawOff = dy - yaw;
+    yaw = dy - yawOff;
+    pitch = Math.max(-0.9, Math.min(0.9, dp));
+  }
+  // Must run inside a tap. iOS asks for Motion & Orientation permission here.
+  function enableGyro() {
+    return new Promise(function (resolve, reject) {
+      if (typeof DeviceOrientationEvent === 'undefined') { reject(new Error('unsupported')); return; }
+      function attach() {
+        if (!gyroReady) { window.addEventListener('deviceorientation', onOrient, true); gyroReady = true; }
+        resolve();
+      }
+      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        DeviceOrientationEvent.requestPermission().then(function (r) { if (r === 'granted') attach(); else reject(new Error('denied')); }, reject);
+      } else attach();
+    });
+  }
+  function setCtrl(c) {
+    ctrl = c;
+    var bs = $('cfg-ctrl').querySelectorAll('button');
+    for (var i = 0; i < bs.length; i++) bs[i].setAttribute('aria-pressed', String(bs[i].getAttribute('data-c') === c));
+    $('cfg-ctrl-note').textContent = c === 'gyro'
+      ? 'Turn your whole device to look around. Two buttons only: left walks, right runs. Hold it upright, in landscape.'
+      : 'Left thumb moves, right thumb looks.';
+    document.body.classList.toggle('gyro', c === 'gyro');
+    try { localStorage.setItem('mochibo-ctrl', c); } catch (er) {}
+  }
+  $('cfg-ctrl').addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    var c = b.getAttribute('data-c');
+    if (c === 'touch') { setCtrl('touch'); return; }
+    setCtrl('gyro');
+    enableGyro().catch(function (err) {
+      setCtrl('touch');
+      $('cfg-ctrl-note').textContent = (err && err.message === 'denied')
+        ? 'Motion access was denied. On iPhone, allow it in Settings > Safari > Motion & Orientation Access, then reload.'
+        : 'This page cannot read motion sensors here. Open the game directly in Safari or Chrome to use the gyroscope.';
+    });
+  });
 
   /* ---------- input: mouse + keyboard (desktop) ---------- */
   var dragging = false;
@@ -955,8 +1062,8 @@
     if (state === 'playing' && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].indexOf(e.code) >= 0) e.preventDefault();
   });
   window.addEventListener('keyup', function (e) { keys[e.code] = false; });
-  window.addEventListener('blur', function () { keys = {}; joy.x = joy.y = 0; runOff(); });
-  document.addEventListener('visibilitychange', function () { if (document.hidden) { keys = {}; runOff(); } });
+  window.addEventListener('blur', function () { keys = {}; joy.x = joy.y = 0; runOff(); walkOff(); });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) { keys = {}; runOff(); walkOff(); } });
 
   /* ---------- chaser settings ---------- */
   function setSpeedUI(m) {
@@ -985,7 +1092,16 @@
   });
 
   /* ---------- boot ---------- */
-  $('go').addEventListener('click', function () { $('stats').hidden = true; startGame(); });
+  $('go').addEventListener('click', function () {
+    $('stats').hidden = true;
+    if (ctrl === 'gyro' && !gyroReady) {
+      enableGyro().then(startGame, function () {
+        setCtrl('touch');
+        $('cfg-ctrl-note').textContent = 'Motion sensors are not available here, so stick controls are on.';
+        startGame();
+      });
+    } else startGame();
+  });
   var savedImg = null, savedName = '';
   try {
     var sz = parseFloat(localStorage.getItem('mochibo-size')); if (sz >= 1.4 && sz <= 3.2) chaserH = sz;
@@ -994,6 +1110,7 @@
   } catch (e) {}
   $('cfg-size').value = String(chaserH); $('cfg-size-out').textContent = chaserH.toFixed(1);
   setSpeedUI(speedMult);
+  try { if (localStorage.getItem('mochibo-ctrl') === 'gyro' && typeof DeviceOrientationEvent !== 'undefined') setCtrl('gyro'); } catch (e) {}
   if (savedImg) loadImageSrc(savedImg, savedName, false); else useDefault(false);
   buildLevel();
   requestAnimationFrame(frame);
